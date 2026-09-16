@@ -18,11 +18,13 @@ from states import OrderForm, AdForm, PromoForm, AdminForm
 from utils import safe_edit, rub_to_ton, find_ton_payment
 
 
-def register_handlers(dp, bot):
+from runtime import bot, dp
 
-    # ==================== /START ====================
-    @dp.message(Command("start"))
-    async def cmd_start(message: types.Message, state: FSMContext):
+# дальше все хендлеры БЕЗ обёртки в функцию, на верхнем уровне:
+
+@dp.message(Command("start"))
+async def cmd_start:
+    (message: types.Message, state: FSMContext):
         await state.clear()
         user_id = message.from_user.id
         ref_id = None
