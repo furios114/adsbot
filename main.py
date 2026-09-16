@@ -2,19 +2,23 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
 from config import BOT_TOKEN
-from handlers import register_handlers
 
 logging.basicConfig(level=logging.INFO)
 
+bot = Bot(token=BOT_TOKEN,
+          default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
+
+# ВАЖНО: импорт handlers ПОСЛЕ создания dp и bot,
+# чтобы внутри handlers.py они были доступны
+import handlers  # noqa: E402,F401
+
 
 async def main():
-    bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher()
-
-    register_handlers(dp, bot)
-
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
