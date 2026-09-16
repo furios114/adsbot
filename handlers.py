@@ -16,15 +16,11 @@ from keyboards import (main_keyboard, admin_keyboard, categories_choice_keyboard
                        cancel_keyboard)
 from states import OrderForm, AdForm, PromoForm, AdminForm
 from utils import safe_edit, rub_to_ton, find_ton_payment
+from runtime import bot, dp   # <--- ВОТ ЭТО ГЛАВНОЕ
 
-
-from runtime import bot, dp
-
-# дальше все хендлеры БЕЗ обёртки в функцию, на верхнем уровне:
 
 @dp.message(Command("start"))
-async def cmd_start:
-    (message: types.Message, state: FSMContext):
+async def cmd_start(message: types.Message, state: FSMContext)
         await state.clear()
         user_id = message.from_user.id
         ref_id = None
