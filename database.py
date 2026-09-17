@@ -62,6 +62,30 @@ def init_db():
             used_by INTEGER,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS parser_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER UNIQUE,
+            session_string TEXT,
+            phone TEXT,
+            is_active INTEGER DEFAULT 0,
+            chats_count INTEGER DEFAULT 0,
+            last_error TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS parsed_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_chat TEXT,
+            source_chat_title TEXT,
+            author_id INTEGER,
+            author_username TEXT,
+            author_name TEXT,
+            message_id INTEGER,
+            message_text TEXT,
+            message_link TEXT,
+            category TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         """)
 
 
@@ -79,6 +103,7 @@ class Database:
     def close(self):
         self.conn.close()
 
+    # ---------- USERS ----------
     def get_user(self, telegram_id):
         cur = self.conn.cursor()
         cur.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
@@ -156,6 +181,7 @@ class Database:
                     (amount, telegram_id))
         self.conn.commit()
 
+    # ---------- ORDERS ----------
     def get_today_orders_count(self, telegram_id):
         cur = self.conn.cursor()
         cur.execute("""
@@ -172,11 +198,13 @@ class Database:
         """, (telegram_id, category, description, contacts))
         self.conn.commit()
 
+    # ---------- REFERRALS ----------
     def get_referrals_count(self, telegram_id):
         cur = self.conn.cursor()
         cur.execute("SELECT COUNT(*) AS c FROM referrals WHERE referrer_id=?", (telegram_id,))
         return cur.fetchone()['c']
 
+    # ---------- CATEGORIES ----------
     def get_user_categories(self, telegram_id):
         cur = self.conn.cursor()
         cur.execute("SELECT category FROM user_categories WHERE user_id=?", (telegram_id,))
@@ -194,6 +222,7 @@ class Database:
                         (telegram_id, category))
         self.conn.commit()
 
+    # ---------- PROMOCODES ----------
     def create_promocode(self, code, action, value):
         cur = self.conn.cursor()
         cur.execute("INSERT INTO promocodes (code, action, value) VALUES (?, ?, ?)",
@@ -210,6 +239,7 @@ class Database:
         self.conn.commit()
         return dict(row)
 
+    # ---------- ADS ----------
     def create_ad(self, user_id, ad_text, media_type, media_id, button_text, button_url):
         cur = self.conn.cursor()
         cur.execute("""
@@ -226,6 +256,68 @@ class Database:
                         ORDER BY id DESC LIMIT 1)
         """, (user_id,))
         self.conn.commit()
+
+    # ---------- PARSER SESSIONS ----------
+    def get_parser_session(self, telegram_id):
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM parser_sessions WHERE telegram_id=?", (telegram_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def save_parser_session(self, telegram_id, session_string, phone):
+        cur = self.conn.cursor()
+        cur.execute("""
+            INSERT INTO parser_sessions (telegram_id, session_string, phone, is_active)
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                session_string=excluded.session_string,
+                phone=excluded.phone,
+                is_active=1,
+                updated_at=CURRENT_TIMESTAMP
+        """, (telegram_id, session_string, phone))
+        self.conn.commit()
+
+    def deactivate_parser_session(self, telegram_id):
+        cur = self.conn.cursor()
+        cur.execute("UPDATE parser_sessions SET is_active=0, updated_at=CURRENT_TIMESTAMP "
+                    "WHERE telegram_id=?", (telegram_id,))
+        self.conn.commit()
+
+    def update_parser_stats(self, telegram_id, chats_count=None, last_error=None):
+        cur = self.conn.cursor()
+        if chats_count is not None:
+            cur.execute("UPDATE parser_sessions SET chats_count=?, updated_at=CURRENT_TIMESTAMP "
+                        "WHERE telegram_id=?", (chats_count, telegram_id))
+        if last_error is not None:
+            cur.execute("UPDATE parser_sessions SET last_error=?, updated_at=CURRENT_TIMESTAMP "
+                        "WHERE telegram_id=?", (last_error, telegram_id))
+        self.conn.commit()
+
+    def get_all_active_sessions(self):
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM parser_sessions WHERE is_active=1")
+        return [dict(r) for r in cur.fetchall()]
+
+    # ---------- PARSED ORDERS ----------
+    def create_parsed_order(self, source_chat, source_chat_title, author_id,
+                            author_username, author_name, message_id,
+                            message_text, message_link, category):
+        cur = self.conn.cursor()
+        cur.execute("""
+            INSERT INTO parsed_orders
+            (source_chat, source_chat_title, author_id, author_username,
+             author_name, message_id, message_text, message_link, category)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (source_chat, source_chat_title, author_id, author_username,
+              author_name, message_id, message_text, message_link, category))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def is_message_already_parsed(self, source_chat, message_id):
+        cur = self.conn.cursor()
+        cur.execute("SELECT 1 FROM parsed_orders WHERE source_chat=? AND message_id=?",
+                    (source_chat, message_id))
+        return cur.fetchone() is not None
 
 
 init_db()
