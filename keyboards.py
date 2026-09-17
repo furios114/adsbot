@@ -11,7 +11,6 @@ def main_keyboard(user_id: int = None) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📝 Разместить заявку", callback_data="menu_order")],
         [InlineKeyboardButton(text="👥 Реферальная система", callback_data="menu_referral")],
         [InlineKeyboardButton(text="📢 Разместить рекламу", callback_data="menu_ad")],
-        [InlineKeyboardButton(text="🕵️ Парсер чатов", callback_data="menu_parser")],
         [InlineKeyboardButton(text="📂 Выбор категорий", callback_data="menu_categories")],
         [InlineKeyboardButton(text="🎫 Промокод", callback_data="menu_promo")],
         [InlineKeyboardButton(text="🆘 Техническая поддержка", url=SUPPORT_URL)],
@@ -72,31 +71,4 @@ def categories_keyboard(user_id: int) -> InlineKeyboardMarkup:
 def cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="menu_home")]
-    ])
-
-
-# ---------- PARSER KEYBOARDS ----------
-def parser_menu_keyboard(has_session: bool = False) -> InlineKeyboardMarkup:
-    rows = []
-    if has_session:
-        rows.append([InlineKeyboardButton(text="📊 Статус парсера", callback_data="parser_status")])
-        rows.append([InlineKeyboardButton(text="🔄 Переподключить", callback_data="parser_reconnect")])
-        rows.append([InlineKeyboardButton(text="🛑 Отключить парсер", callback_data="parser_stop")])
-    else:
-        rows.append([InlineKeyboardButton(text="✅ Подключить парсер", callback_data="parser_connect")])
-    rows.append([InlineKeyboardButton(text="❓ Как это работает", callback_data="parser_help")])
-    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_home")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def parser_help_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Подключить парсер", callback_data="parser_connect")],
-        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_home")],
-    ])
-
-
-def parser_cancel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="menu_parser")],
     ])
