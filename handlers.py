@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import random
 import string
 
@@ -16,444 +15,450 @@ from keyboards import (main_keyboard, admin_keyboard, categories_choice_keyboard
                        cancel_keyboard)
 from states import OrderForm, AdForm, PromoForm, AdminForm
 from utils import safe_edit, rub_to_ton, find_ton_payment
-from runtime import bot, dp   # <--- ВОТ ЭТО ГЛАВНОЕ
+from runtime import bot, dp
 
 
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext)
-        await state.clear()
-        user_id = message.from_user.id
-        ref_id = None
-        parts = message.text.split(maxsplit=1)
-        if len(parts) > 1 and parts[1].startswith("ref_"):
-            try:
-                ref_id = int(parts[1].replace("ref_", ""))
-                if ref_id == user_id:
-                    ref_id = None
-            except ValueError:
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    user_id = message.from_user.id
+    ref_id = None
+    parts = message.text.split(maxsplit=1)
+    if len(parts) > 1 and parts[1].startswith("ref_"):
+        try:
+            ref_id = int(parts[1].replace("ref_", ""))
+            if ref_id == user_id:
                 ref_id = None
+        except ValueError:
+            ref_id = None
 
+    with Database() as db:
+        user = db.get_user(user_id)
+        if not user:
+            user = db.create_user(user_id, message.from_user.username,
+                                  message.from_user.full_name, ref_id)
+        if user_id in ADMIN_IDS and user['status'] != 'premium_forever':
+            db.update_user_status(user_id, 'premium_forever')
+
+    await message.answer(
+        "📊 Тебе больше не нужно искать покупателей — мы делаем это за тебя!\n\n"
+        "🔎 Ищем покупателей рекламы, ОП и трафика в 800+ чатах Telegram\n\n"
+        "💸 Начни зарабатывать в разы больше!\n\n"
+        "Выбери действие 👇",
+        reply_markup=main_keyboard(user_id),
+    )
+
+
+@dp.callback_query(F.data == "menu_home")
+async def menu_home(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await safe_edit(
+        callback,
+        "📊 Тебе больше не нужно искать покупателей — мы делаем это за тебя!\n\n"
+        "🔎 Ищем покупателей рекламы, ОП и трафика в 800+ чатах Telegram\n\n"
+        "💸 Начни зарабатывать в разы больше!\n\n"
+        "Выбери действие 👇",
+        main_keyboard(callback.from_user.id),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "menu_account")
+async def account(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    with Database() as db:
+        user = db.get_user(user_id) or db.create_user(
+            user_id, callback.from_user.username, callback.from_user.full_name)
+        referrals = db.get_referrals_count(user_id)
+
+    status_text = {
+        'premium_forever': "👑 ПРЕМИУМ НАВСЕГДА",
+        'premium': "💎 Премиум",
+    }.get(user['status'], "🎁 Пробный доступ")
+
+    text = (
+        f"👤 Мой аккаунт\n\n"
+        f"🆔 ID: {user_id}\n"
+        f"📊 Статус: {status_text}\n"
+        f"💰 Баланс: {user['balance']} ₽\n"
+        f"👥 Рефералов: {referrals}"
+    )
+    await safe_edit(callback, text, main_keyboard(user_id))
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "menu_premium")
+async def show_premium(callback: types.CallbackQuery):
+    if callback.from_user.id in ADMIN_IDS:
+        await callback.answer("👑 Админам премиум не нужен!", show_alert=True)
+        return
+    text = (
+        "💎 Выбери тариф:\n\n"
+        "1 МЕСЯЦ — 890₽\n"
+        "3 МЕСЯЦА — 680₽/мес 🎁 +2 недели\n"
+        "6 МЕСЯЦЕВ — 590₽/мес 👍 ХИТ\n"
+        "12 МЕСЯЦЕВ — 530₽/мес 💰 ВЫГОДНО\n\n"
+        "🔥 8 из 10 выбирают тариф на 6 или 12 месяцев\n\n"
+        "👇 Выбирай тариф ниже"
+    )
+    await safe_edit(callback, text, premium_keyboard())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("premium_"))
+async def process_premium(callback: types.CallbackQuery):
+    if callback.from_user.id in ADMIN_IDS:
+        await callback.answer("👑 Админам премиум не нужен!", show_alert=True)
+        return
+    plan = callback.data.replace("premium_", "")
+    if plan not in PRICES:
+        await callback.answer("❌ Неверный тариф", show_alert=True)
+        return
+    info = PRICES[plan]
+    total = info['price'] * info['months']
+    text = (f"💎 Оформление на {info['months']} мес.\n\n"
+            f"Цена: {info['price']}₽/мес\n"
+            f"К оплате всего: {total}₽\n\n"
+            f"Выбери способ оплаты 👇")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🪙 Криптовалюта (TON)",
+                              callback_data=f"crypto_{plan}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_premium")],
+    ])
+    await safe_edit(callback, text, kb)
+    await callback.answer()
+@dp.callback_query(F.data.startswith("crypto_"))
+async def process_crypto(callback: types.CallbackQuery):
+    plan = callback.data.replace("crypto_", "")
+    if plan not in PRICES:
+        await callback.answer("❌ Ошибка тарифа", show_alert=True)
+        return
+    info = PRICES[plan]
+    total_rub = info['price'] * info['months']
+    total_ton = rub_to_ton(total_rub)
+    user_id = callback.from_user.id
+    comment = f"premium_{user_id}_{plan}"
+    text = (
+        f"🪙 Оплата криптовалютой\n\n"
+        f"Тариф: {info['months']} мес.\n"
+        f"Сумма: {total_rub}₽ ({total_ton} TON)\n\n"
+        f"Отправьте {total_ton} TON на адрес:\n"
+        f"{TON_ADDRESS}\n\n"
+        f"📝 В комментарии укажите:\n{comment}\n\n"
+        f"⚠️ Без комментария платеж не засчитается!\n\n"
+        f"🔄 После оплаты нажмите кнопку проверки"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Я оплатил",
+                              callback_data=f"check_premium_{plan}_{user_id}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_premium")],
+    ])
+    await safe_edit(callback, text, kb)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("check_premium_"))
+async def check_payment(callback: types.CallbackQuery):
+    parts = callback.data.split("_")
+    if len(parts) < 4:
+        await callback.answer("❌ Ошибка данных", show_alert=True)
+        return
+    plan, user_id = parts[2], int(parts[3])
+    if callback.from_user.id != user_id:
+        await callback.answer("❌ Это не ваш платеж!", show_alert=True)
+        return
+    if plan not in PRICES:
+        await callback.answer("❌ Неверный тариф", show_alert=True)
+        return
+
+    await callback.answer("🔄 Проверяем платеж...")
+    info = PRICES[plan]
+    expected_ton = rub_to_ton(info['price'] * info['months'])
+    expected_comment = f"premium_{user_id}_{plan}"
+
+    found = await find_ton_payment(expected_comment, expected_ton)
+    if found:
         with Database() as db:
-            user = db.get_user(user_id)
-            if not user:
-                user = db.create_user(user_id, message.from_user.username,
-                                      message.from_user.full_name, ref_id)
-            if user_id in ADMIN_IDS and user['status'] != 'premium_forever':
-                db.update_user_status(user_id, 'premium_forever')
-
-        await message.answer(
-            "📊 Тебе больше не нужно искать покупателей — мы делаем это за тебя!\n\n"
-            "🔎 Ищем покупателей рекламы, ОП и трафика в 800+ чатах Telegram\n\n"
-            "💸 Начни зарабатывать в разы больше!\n\n"
-            "Выбери действие 👇",
-            reply_markup=main_keyboard(user_id),
-        )
-
-    # ==================== ГЛАВНОЕ МЕНЮ ====================
-    @dp.callback_query(F.data == "menu_home")
-    async def menu_home(callback: types.CallbackQuery, state: FSMContext):
-        await state.clear()
-        await safe_edit(
-            callback,
-            "📊 Тебе больше не нужно искать покупателей — мы делаем это за тебя!\n\n"
-            "🔎 Ищем покупателей рекламы, ОП и трафика в 800+ чатах Telegram\n\n"
-            "💸 Начни зарабатывать в разы больше!\n\n"
-            "Выбери действие 👇",
-            main_keyboard(callback.from_user.id),
-        )
-        await callback.answer()
-
-    # ==================== АККАУНТ ====================
-    @dp.callback_query(F.data == "menu_account")
-    async def account(callback: types.CallbackQuery):
-        user_id = callback.from_user.id
-        with Database() as db:
-            user = db.get_user(user_id) or db.create_user(
-                user_id, callback.from_user.username, callback.from_user.full_name)
-            referrals = db.get_referrals_count(user_id)
-        status_text = {
-            'premium_forever': "👑 ПРЕМИУМ НАВСЕГДА",
-            'premium': "💎 Премиум",
-        }.get(user['status'], "🎁 Пробный доступ")
-        text = (
-            f"👤 Мой аккаунт\n\n"
-            f"🆔 ID: {user_id}\n"
-            f"📊 Статус: {status_text}\n"
-            f"💰 Баланс: {user['balance']} ₽\n"
-            f"👥 Рефералов: {referrals}"
-        )
-        await safe_edit(callback, text, main_keyboard(user_id))
-        await callback.answer()
-
-    # ==================== ПРЕМИУМ ====================
-    @dp.callback_query(F.data == "menu_premium")
-    async def show_premium(callback: types.CallbackQuery):
-        if callback.from_user.id in ADMIN_IDS:
-            await callback.answer("👑 Админам премиум не нужен!", show_alert=True)
-            return
-        text = (
-            "💎 Выбери тариф:\n\n"
-            "1 МЕСЯЦ — 890₽\n"
-            "3 МЕСЯЦА — 680₽/мес 🎁 +2 недели\n"
-            "6 МЕСЯЦЕВ — 590₽/мес 👍 ХИТ\n"
-            "12 МЕСЯЦЕВ — 530₽/мес 💰 ВЫГОДНО\n\n"
-            "🔥 8 из 10 выбирают тариф на 6 или 12 месяцев\n\n"
-            "👇 Выбирай тариф ниже"
-        )
-        await safe_edit(callback, text, premium_keyboard())
-        await callback.answer()
-
-    @dp.callback_query(F.data.startswith("premium_"))
-    async def process_premium(callback: types.CallbackQuery):
-        if callback.from_user.id in ADMIN_IDS:
-            await callback.answer("👑 Админам премиум не нужен!", show_alert=True)
-            return
-        plan = callback.data.replace("premium_", "")
-        if plan not in PRICES:
-            await callback.answer("❌ Неверный тариф", show_alert=True)
-            return
-        info = PRICES[plan]
-        total = info['price'] * info['months']
-        text = (f"💎 Оформление на {info['months']} мес.\n\n"
-                f"Цена: {info['price']}₽/мес\n"
-                f"К оплате всего: {total}₽\n\n"
-                f"Выбери способ оплаты 👇")
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🪙 Криптовалюта (TON)",
-                                  callback_data=f"crypto_{plan}")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_premium")],
-        ])
-        await safe_edit(callback, text, kb)
-        await callback.answer()
-
-    @dp.callback_query(F.data.startswith("crypto_"))
-    async def process_crypto(callback: types.CallbackQuery):
-        plan = callback.data.replace("crypto_", "")
-        if plan not in PRICES:
-            await callback.answer("❌ Ошибка тарифа", show_alert=True)
-            return
-        info = PRICES[plan]
-        total_rub = info['price'] * info['months']
-        total_ton = rub_to_ton(total_rub)
-        user_id = callback.from_user.id
-        comment = f"premium_{user_id}_{plan}"
-        text = (
-            f"🪙 Оплата криптовалютой\n\n"
-            f"Тариф: {info['months']} мес.\n"
-            f"Сумма: {total_rub}₽ ({total_ton} TON)\n\n"
-            f"Отправьте {total_ton} TON на адрес:\n"
-            f"{TON_ADDRESS}\n\n"
-            f"📝 В комментарии укажите:\n{comment}\n\n"
-            f"⚠️ Без комментария платеж не засчитается!\n\n"
-            f"🔄 После оплаты нажмите кнопку проверки"
-        )
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Я оплатил",
-                                  callback_data=f"check_premium_{plan}_{user_id}")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_premium")],
-        ])
-        await safe_edit(callback, text, kb)
-        await callback.answer()
-
-    @dp.callback_query(F.data.startswith("check_premium_"))
-    async def check_payment(callback: types.CallbackQuery):
-        parts = callback.data.split("_")
-        if len(parts) < 4:
-            await callback.answer("❌ Ошибка данных", show_alert=True)
-            return
-        plan, user_id = parts[2], int(parts[3])
-        if callback.from_user.id != user_id:
-            await callback.answer("❌ Это не ваш платеж!", show_alert=True)
-            return
-        if plan not in PRICES:
-            await callback.answer("❌ Неверный тариф", show_alert=True)
-            return
-
-        await callback.answer("🔄 Проверяем платеж...")
-        info = PRICES[plan]
-        expected_ton = rub_to_ton(info['price'] * info['months'])
-        expected_comment = f"premium_{user_id}_{plan}"
-
-        found = await find_ton_payment(expected_comment, expected_ton)
-        if found:
-            with Database() as db:
-                db.update_user_status(user_id, 'premium', info['months'])
-            await safe_edit(callback,
-                            f"✅ Платеж подтвержден!\n\n"
-                            f"Премиум на {info['months']} мес. активирован!\n\n"
-                            f"Спасибо за доверие! ❤️")
-        else:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Проверить еще раз",
-                                      callback_data=f"check_premium_{plan}_{user_id}")],
-                [InlineKeyboardButton(text="👤 Поддержка", url=SUPPORT_URL)],
-                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_home")],
-            ])
-            await safe_edit(callback,
-                            "⏳ Платеж не найден\n\n"
-                            "Возможные причины:\n"
-                            "• Транзакция еще не подтверждена (1-2 минуты)\n"
-                            "• Неправильная сумма или комментарий\n"
-                            "• Вы отправили не на тот адрес\n\n"
-                            "Если уверены — напишите в поддержку.",
-                            kb)
-
-    # ==================== ЗАЯВКА ====================
-    @dp.callback_query(F.data == "menu_order")
-    async def order_start(callback: types.CallbackQuery, state: FSMContext):
-        user_id = callback.from_user.id
-        await state.clear()
-        with Database() as db:
-            user = db.get_user(user_id) or db.create_user(
-                user_id, callback.from_user.username, callback.from_user.full_name)
-            today = db.get_today_orders_count(user_id)
-
-        if user['status'] == 'premium_forever' or user_id in ADMIN_IDS:
-            max_orders = 999
-        else:
-            max_orders = 3 if user['status'] == 'premium' else 1
-
-        if today >= max_orders:
-            await callback.answer("❌ Лимит заявок на сегодня исчерпан", show_alert=True)
-            return
-
-        await safe_edit(
-            callback,
-            f"📢 Размести бесплатно заявку на покупку\n\n"
-            f"📊 Сегодня доступно: {today + 1} из {max_orders}\n\n"
-            f"💎 С ПРЕМИУМОМ можно размещать 3 заявки в день.\n\n"
-            "📝 Шаг 1 из 3. Выберите категорию заявки:",
-            categories_choice_keyboard(),
-        )
-        await state.set_state(OrderForm.category)
-        await callback.answer()
-
-    @dp.callback_query(OrderForm.category, F.data.startswith("ordcat_"))
-    async def order_category(callback: types.CallbackQuery, state: FSMContext):
-        label = callback.data.replace("ordcat_", "")
-        if label not in ORDER_CATEGORIES:
-            await callback.answer("❌ Неверная категория", show_alert=True)
-            return
-        await state.update_data(category=ORDER_CATEGORIES[label])
-        await safe_edit(
-            callback,
-            "📝 Шаг 2 из 3. Напишите текст заявки одним сообщением.\n\n"
-            "Опишите, что вы ищете (бюджет, требования, сроки):",
-            cancel_keyboard(),
-        )
-        await state.set_state(OrderForm.description)
-        await callback.answer()
-
-    @dp.message(OrderForm.description)
-    async def order_description(message: types.Message, state: FSMContext):
-        if not message.text or len(message.text.strip()) < 3:
-            await message.answer("❌ Текст слишком короткий. Опишите подробнее (мин. 3 символа):")
-            return
-        await state.update_data(description=message.text.strip())
-        username = f"@{message.from_user.username}" if message.from_user.username else "Не указан"
-        await message.answer(
-            f"📩 Шаг 3 из 3. Укажите контакт для связи.\n\n"
-            f"Ваш юзернейм: {username}\n\n"
-            f"Введите любой контакт (юзернейм или телефон):",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Использовать мой", callback_data="use_my_contact")],
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="menu_home")],
-            ]),
-        )
-        await state.set_state(OrderForm.contacts)
-
-    @dp.callback_query(OrderForm.contacts, F.data == "use_my_contact")
-    async def use_my_contact(callback: types.CallbackQuery, state: FSMContext):
-        username = callback.from_user.username
-        if not username:
-            await callback.answer("❌ У вас нет юзернейма, введите вручную", show_alert=True)
-            return
-        await _finalize_order(callback.message, callback.from_user, state, f"@{username}", bot)
-        await callback.answer()
-
-    @dp.message(OrderForm.contacts)
-    async def order_contacts(message: types.Message, state: FSMContext):
-        contacts = message.text.strip()
-        if not contacts:
-            await message.answer("❌ Пустой контакт, попробуйте снова:")
-            return
-        if not contacts.startswith("@"):
-            contacts = f"@{contacts}"
-        await _finalize_order(message, message.from_user, state, contacts, bot)
-
-    async def _finalize_order(message: types.Message, from_user, state: FSMContext,
-                              contacts: str, bot):
-        data = await state.get_data()
-        await state.clear()
-        category = data.get('category', 'Без категории')
-        description = data.get('description', '')
-        user_id = from_user.id
-
-        with Database() as db:
-            user = db.get_user(user_id)
-            db.create_order(user_id, category, description, contacts)
-
-        user_status = ("👑 Админ" if user_id in ADMIN_IDS
-                       else "💎 ПРЕМИУМ" if user and user['status'] in ('premium', 'premium_forever')
-                       else "🎁 Пробный")
-
-        await message.answer(
-            f"✅ Заявка создана!\n\n"
-            f"📂 Категория: {category}\n"
-            f"📝 {description}\n"
-            f"📱 {contacts}",
-            reply_markup=main_keyboard(user_id),
-        )
-
-        if from_user.username:
-            buyer_link = f"https://t.me/{from_user.username}"
-        else:
-            buyer_link = f"tg://user?id={user_id}"
-
-        asyncio.create_task(_broadcast_order(
-            bot, buyer_link, user_status, description, contacts, category))
-
-    async def _broadcast_order(bot, buyer_link, user_status, description,
-                                contacts, category):
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💬 Написать покупателю", url=buyer_link)]
-        ])
-        text = (
-            f"📢 Новая заявка!\n\n"
-            f"📂 Категория: {category}\n"
-            f"📝 {description}\n\n"
-            f"👤 Статус: {user_status}\n"
-            f"📱 Контакт: {contacts}"
-        )
-        with Database() as db:
-            users = db.get_all_users()
-
-        sent_count = 0
-        for u in users:
-            try:
-                if u['status'] == 'premium':
-                    with Database() as db2:
-                        user_cats = db2.get_user_categories(u['telegram_id'])
-                    if user_cats and category not in user_cats:
-                        continue
-                await bot.send_message(u['telegram_id'], text, reply_markup=kb)
-                sent_count += 1
-                await asyncio.sleep(0.05)
-            except Exception:
-                continue
-
-        for admin_id in ADMIN_IDS:
-            try:
-                await bot.send_message(admin_id,
-                                       f"📊 Рассылка заявки: {sent_count} получателей")
-            except Exception:
-                pass
-
-    # ==================== РЕФЕРАЛЫ ====================
-    @dp.callback_query(F.data == "menu_referral")
-    async def referral(callback: types.CallbackQuery):
-        user_id = callback.from_user.id
-        with Database() as db:
-            user = db.get_user(user_id) or db.create_user(
-                user_id, callback.from_user.username, callback.from_user.full_name)
-            count = db.get_referrals_count(user_id)
-        me = await bot.get_me()
-        ref_link = f"https://t.me/{me.username}?start=ref_{user_id}"
-        text = (
-            f"👥 Реферальная система\n\n"
-            f"Приглашай друзей и получай 100 ₽ за каждого!\n\n"
-            f"🔗 Твоя ссылка:\n{ref_link}\n\n"
-            f"👥 Рефералов: {count}\n"
-            f"💰 Заработано: {user['balance']} ₽"
-        )
-        await safe_edit(callback, text, main_keyboard(user_id))
-        await callback.answer()
-
-    # ==================== КАТЕГОРИИ ====================
-    @dp.callback_query(F.data == "menu_categories")
-    async def show_categories(callback: types.CallbackQuery):
-        user_id = callback.from_user.id
-        await safe_edit(
-            callback,
-            "📂 Выбери категории заявок, которые хочешь получать:\n"
-            "✅ — получаешь, ❌ — не получаешь",
-            categories_keyboard(user_id),
-        )
-        await callback.answer()
-
-    @dp.callback_query(F.data.startswith("cat_toggle_"))
-    async def toggle_category(callback: types.CallbackQuery):
-        user_id = callback.from_user.id
-        cat = callback.data.replace("cat_toggle_", "")
-        if cat not in CATEGORIES:
-            await callback.answer("❌ Неверная категория", show_alert=True)
-            return
-        with Database() as db:
-            db.toggle_user_category(user_id, cat)
-        await safe_edit(
-            callback,
-            "📂 Выбери категории заявок, которые хочешь получать:\n"
-            "✅ — получаешь, ❌ — не получаешь",
-            categories_keyboard(user_id),
-        )
-        await callback.answer("✅ Обновлено")
-
-    # ==================== РЕКЛАМА ====================
-    @dp.callback_query(F.data == "menu_ad")
-    async def ad_start(callback: types.CallbackQuery, state: FSMContext):
-        await state.clear()
-        await safe_edit(
-            callback,
-            "✏️ Объявление пустое. Добавь текст и/или медиа 👇",
-            ad_creation_keyboard(),
-        )
-        await state.set_state(AdForm.ready_for_publish)
-        await callback.answer()
-
-    @dp.callback_query(AdForm.ready_for_publish, F.data == "ad_text")
-    async def ad_add_text(callback: types.CallbackQuery, state: FSMContext):
-        await safe_edit(callback, "✏️ Введи текст объявления:", cancel_keyboard())
-        await state.set_state(AdForm.waiting_for_text)
-        await callback.answer()
-
-    @dp.message(AdForm.waiting_for_text)
-    async def ad_process_text(message: types.Message, state: FSMContext):
-        if not message.text or len(message.text.strip()) < 3:
-            await message.answer("❌ Текст слишком короткий, попробуйте снова:")
-            return
-        await state.update_data(ad_text=message.text.strip())
-        await message.answer("✅ Текст добавлен!", reply_markup=ad_creation_keyboard())
-        await state.set_state(AdForm.ready_for_publish)
-
-    @dp.callback_query(AdForm.ready_for_publish, F.data == "ad_media")
-    async def ad_add_media(callback: types.CallbackQuery, state: FSMContext):
-        await safe_edit(callback, "📎 Отправь фото или видео:", cancel_keyboard())
-        await state.set_state(AdForm.waiting_for_media)
-        await callback.answer()
-
-    @dp.message(AdForm.waiting_for_media, F.photo | F.video | F.document)
-    async def ad_process_media(message: types.Message, state: FSMContext):
-        if message.photo:
-            media = {'type': 'photo', 'file_id': message.photo[-1].file_id}
-        elif message.video:
-            media = {'type': 'video', 'file_id': message.video.file_id}
-        else:
-            media = {'type': 'document', 'file_id': message.document.file_id}
-        await state.update_data(ad_media=media)
-        await message.answer("✅ Медиа добавлено!", reply_markup=ad_creation_keyboard())
-        await state.set_state(AdForm.ready_for_publish)
-
-    @dp.message(AdForm.waiting_for_media)
-    async def ad_media_error(message: types.Message):
-        await message.answer("❌ Отправь фото, видео или файл:")
-
-    @dp.callback_query(AdForm.ready_for_publish, F.data == "ad_button")
-    async def ad_add_button(callback: types.CallbackQuery, state: FSMContext):
+            db.update_user_status(user_id, 'premium', info['months'])
         await safe_edit(callback,
-                        "🔗 Формат: Текст | https://ссылка.ру",
-                        cancel_keyboard())
-        await state.set_state(AdForm.waiting_for_button)
-        await callback.answer()
+                        f"✅ Платеж подтвержден!\n\n"
+                        f"Премиум на {info['months']} мес. активирован!\n\n"
+                        f"Спасибо за доверие! ❤️")
+    else:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Проверить еще раз",
+                                  callback_data=f"check_premium_{plan}_{user_id}")],
+            [InlineKeyboardButton(text="👤 Поддержка", url=SUPPORT_URL)],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_home")],
+        ])
+        await safe_edit(callback,
+                        "⏳ Платеж не найден\n\n"
+                        "Проверьте сумму и комментарий.\n"
+                        "Если уверены — напишите в поддержку.",
+                        kb)
+
+
+@dp.callback_query(F.data == "menu_order")
+async def order_start(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    await state.clear()
+    with Database() as db:
+        user = db.get_user(user_id) or db.create_user(
+            user_id, callback.from_user.username, callback.from_user.full_name)
+        today = db.get_today_orders_count(user_id)
+
+    if user['status'] == 'premium_forever' or user_id in ADMIN_IDS:
+        max_orders = 999
+    else:
+        max_orders = 3 if user['status'] == 'premium' else 1
+
+    if today >= max_orders:
+        await callback.answer("❌ Лимит заявок на сегодня исчерпан", show_alert=True)
+        return
+
+    await safe_edit(
+        callback,
+        f"📢 Размести бесплатно заявку на покупку\n\n"
+        f"📊 Сегодня доступно: {today + 1} из {max_orders}\n\n"
+        f"💎 С ПРЕМИУМОМ можно размещать 3 заявки в день.\n\n"
+        "📝 Шаг 1 из 3. Выберите категорию заявки:",
+        categories_choice_keyboard(),
+    )
+    await state.set_state(OrderForm.category)
+    await callback.answer()
+
+
+@dp.callback_query(OrderForm.category, F.data.startswith("ordcat_"))
+async def order_category(callback: types.CallbackQuery, state: FSMContext):
+    label = callback.data.replace("ordcat_", "")
+    if label not in ORDER_CATEGORIES:
+        await callback.answer("❌ Неверная категория", show_alert=True)
+        return
+    await state.update_data(category=ORDER_CATEGORIES[label])
+    await safe_edit(
+        callback,
+        "📝 Шаг 2 из 3. Напишите текст заявки одним сообщением.\n\n"
+        "Опишите, что вы ищете (бюджет, требования, сроки):",
+        cancel_keyboard(),
+    )
+    await state.set_state(OrderForm.description)
+    await callback.answer()
+@dp.message(OrderForm.description)
+async def order_description(message: types.Message, state: FSMContext):
+    if not message.text or len(message.text.strip()) < 3:
+        await message.answer("❌ Текст слишком короткий. Опишите подробнее (мин. 3 символа):")
+        return
+    await state.update_data(description=message.text.strip())
+    username = f"@{message.from_user.username}" if message.from_user.username else "Не указан"
+    await message.answer(
+        f"📩 Шаг 3 из 3. Укажите контакт для связи.\n\n"
+        f"Ваш юзернейм: {username}\n\n"
+        f"Введите любой контакт (юзернейм или телефон):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Использовать мой", callback_data="use_my_contact")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="menu_home")],
+        ]),
+    )
+    await state.set_state(OrderForm.contacts)
+
+
+@dp.callback_query(OrderForm.contacts, F.data == "use_my_contact")
+async def use_my_contact(callback: types.CallbackQuery, state: FSMContext):
+    username = callback.from_user.username
+    if not username:
+        await callback.answer("❌ У вас нет юзернейма, введите вручную", show_alert=True)
+        return
+    await _finalize_order(callback.message, callback.from_user, state, f"@{username}")
+    await callback.answer()
+
+
+@dp.message(OrderForm.contacts)
+async def order_contacts(message: types.Message, state: FSMContext):
+    contacts = message.text.strip()
+    if not contacts:
+        await message.answer("❌ Пустой контакт, попробуйте снова:")
+        return
+    if not contacts.startswith("@"):
+        contacts = f"@{contacts}"
+    await _finalize_order(message, message.from_user, state, contacts)
+
+
+async def _finalize_order(message: types.Message, from_user, state: FSMContext, contacts: str):
+    data = await state.get_data()
+    await state.clear()
+    category = data.get('category', 'Без категории')
+    description = data.get('description', '')
+    user_id = from_user.id
+
+    with Database() as db:
+        user = db.get_user(user_id)
+        db.create_order(user_id, category, description, contacts)
+
+    user_status = ("👑 Админ" if user_id in ADMIN_IDS
+                   else "💎 ПРЕМИУМ" if user and user['status'] in ('premium', 'premium_forever')
+                   else "🎁 Пробный")
+
+    await message.answer(
+        f"✅ Заявка создана!\n\n"
+        f"📂 Категория: {category}\n"
+        f"📝 {description}\n"
+        f"📱 {contacts}",
+        reply_markup=main_keyboard(user_id),
+    )
+
+    if from_user.username:
+        buyer_link = f"https://t.me/{from_user.username}"
+    else:
+        buyer_link = f"tg://user?id={user_id}"
+
+    asyncio.create_task(_broadcast_order(
+        buyer_link, user_status, description, contacts, category))
+
+
+async def _broadcast_order(buyer_link, user_status, description, contacts, category):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Написать покупателю", url=buyer_link)]
+    ])
+    text = (
+        f"📢 Новая заявка!\n\n"
+        f"📂 Категория: {category}\n"
+        f"📝 {description}\n\n"
+        f"👤 Статус: {user_status}\n"
+        f"📱 Контакт: {contacts}"
+    )
+    with Database() as db:
+        users = db.get_all_users()
+
+    sent_count = 0
+    for u in users:
+        try:
+            if u['status'] == 'premium':
+                with Database() as db2:
+                    user_cats = db2.get_user_categories(u['telegram_id'])
+                if user_cats and category not in user_cats:
+                    continue
+            await bot.send_message(u['telegram_id'], text, reply_markup=kb)
+            sent_count += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            continue
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id,
+                                   f"📊 Рассылка заявки: {sent_count} получателей")
+        except Exception:
+            pass
+
+
+@dp.callback_query(F.data == "menu_referral")
+async def referral(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    with Database() as db:
+        user = db.get_user(user_id) or db.create_user(
+            user_id, callback.from_user.username, callback.from_user.full_name)
+        count = db.get_referrals_count(user_id)
+    me = await bot.get_me()
+    ref_link = f"https://t.me/{me.username}?start=ref_{user_id}"
+    text = (
+        f"👥 Реферальная система\n\n"
+        f"Приглашай друзей и получай 100 ₽ за каждого!\n\n"
+        f"🔗 Твоя ссылка:\n{ref_link}\n\n"
+        f"👥 Рефералов: {count}\n"
+        f"💰 Заработано: {user['balance']} ₽"
+    )
+    await safe_edit(callback, text, main_keyboard(user_id))
+    await callback.answer()
+@dp.callback_query(F.data == "menu_categories")
+async def show_categories(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    await safe_edit(
+        callback,
+        "📂 Выбери категории заявок, которые хочешь получать:\n"
+        "✅ — получаешь, ❌ — не получаешь",
+        categories_keyboard(user_id),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("cat_toggle_"))
+async def toggle_category(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    cat = callback.data.replace("cat_toggle_", "")
+    if cat not in CATEGORIES:
+        await callback.answer("❌ Неверная категория", show_alert=True)
+        return
+    with Database() as db:
+        db.toggle_user_category(user_id, cat)
+    await safe_edit(
+        callback,
+        "📂 Выбери категории заявок, которые хочешь получать:\n"
+        "✅ — получаешь, ❌ — не получаешь",
+        categories_keyboard(user_id),
+    )
+    await callback.answer("✅ Обновлено")
+
+
+@dp.callback_query(F.data == "menu_ad")
+async def ad_start(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await safe_edit(
+        callback,
+        "✏️ Объявление пустое. Добавь текст и/или медиа 👇",
+        ad_creation_keyboard(),
+    )
+    await state.set_state(AdForm.ready_for_publish)
+    await callback.answer()
+
+
+@dp.callback_query(AdForm.ready_for_publish, F.data == "ad_text")
+async def ad_add_text(callback: types.CallbackQuery, state: FSMContext):
+    await safe_edit(callback, "✏️ Введи текст объявления:", cancel_keyboard())
+    await state.set_state(AdForm.waiting_for_text)
+    await callback.answer()
+
+
+@dp.message(AdForm.waiting_for_text)
+async def ad_process_text(message: types.Message, state: FSMContext):
+    if not message.text or len(message.text.strip()) < 3:
+        await message.answer("❌ Текст слишком короткий, попробуйте снова:")
+        return
+    await state.update_data(ad_text=message.text.strip())
+    await message.answer("✅ Текст добавлен!", reply_markup=ad_creation_keyboard())
+    await state.set_state(AdForm.ready_for_publish)
+
+
+@dp.callback_query(AdForm.ready_for_publish, F.data == "ad_media")
+async def ad_add_media(callback: types.CallbackQuery, state: FSMContext):
+    await safe_edit(callback, "📎 Отправь фото или видео:", cancel_keyboard())
+    await state.set_state(AdForm.waiting_for_media)
+    await callback.answer()
+
+
+@dp.message(AdForm.waiting_for_media, F.photo | F.video | F.document)
+async def ad_process_media(message: types.Message, state: FSMContext):
+    if message.photo:
+        media = {'type': 'photo', 'file_id': message.photo[-1].file_id}
+    elif message.video:
+        media = {'type': 'video', 'file_id': message.video.file_id}
+    else:
+        media = {'type': 'document', 'file_id': message.document.file_id}
+    await state.update_data(ad_media=media)
+    await message.answer("✅ Медиа добавлено!", reply_markup=ad_creation_keyboard())
+    await state.set_state(AdForm.ready_for_publish)
+
+
+@dp.message(AdForm.waiting_for_media)
+async def ad_media_error(message: types.Message):
+    await message.answer("❌ Отправь фото, видео или файл:")
+
+
+@dp.callback_query(AdForm.ready_for_publish, F.data == "ad_button")
+async def ad_add_button(callback: types.CallbackQuery, state: FSMContext):
+    await safe_edit(callback, "🔗 Формат: Текст | https://ссылка.ру", cancel_keyboard())
+    await state.set_state(AdForm.waiting_for_button)
+    await callback.answer()
+
 
 @dp.message(AdForm.waiting_for_button)
 async def ad_process_button(message: types.Message, state: FSMContext):
@@ -472,7 +477,8 @@ async def ad_process_button(message: types.Message, state: FSMContext):
                              reply_markup=ad_creation_keyboard())
         await state.set_state(AdForm.ready_for_publish)
     except Exception:
-        await message.answer("❌ Неверный формат! Используй: Текст | https://ссылка.ру")
+        await message.answer("❌ Неверный формат! Текст | https://ссылка.ру")
+
 
 @dp.callback_query(AdForm.ready_for_publish, F.data == "ad_publish")
 async def ad_publish(callback: types.CallbackQuery, state: FSMContext):
@@ -512,6 +518,7 @@ async def ad_publish(callback: types.CallbackQuery, state: FSMContext):
     await safe_edit(callback, text, kb)
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("check_ad_"))
 async def check_ad_payment(callback: types.CallbackQuery):
     user_id = int(callback.data.split("_")[2])
@@ -544,12 +551,13 @@ async def check_ad_payment(callback: types.CallbackQuery):
                         "Если уверены — напишите в поддержку.",
                         kb)
 
-# ==================== ПРОМОКОД ====================
+
 @dp.callback_query(F.data == "menu_promo")
 async def promo_start(callback: types.CallbackQuery, state: FSMContext):
     await safe_edit(callback, "🎫 Введите промокод:", cancel_keyboard())
     await state.set_state(PromoForm.waiting_for_code)
     await callback.answer()
+
 
 @dp.message(PromoForm.waiting_for_code)
 async def promo_use(message: types.Message, state: FSMContext):
@@ -572,7 +580,7 @@ async def promo_use(message: types.Message, state: FSMContext):
 
     await message.answer(text, reply_markup=main_keyboard(message.from_user.id))
 
-# ==================== АДМИН-ПАНЕЛЬ ====================
+
 @dp.callback_query(F.data == "menu_admin")
 async def admin_menu(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
@@ -581,6 +589,7 @@ async def admin_menu(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await safe_edit(callback, "⚙️ Админ-панель", admin_keyboard())
     await callback.answer()
+
 
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: types.CallbackQuery):
@@ -596,6 +605,7 @@ async def admin_stats(callback: types.CallbackQuery):
     await safe_edit(callback, text, admin_keyboard())
     await callback.answer()
 
+
 @dp.callback_query(F.data == "admin_grant")
 async def admin_grant_start(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
@@ -605,6 +615,7 @@ async def admin_grant_start(callback: types.CallbackQuery, state: FSMContext):
                     cancel_keyboard())
     await state.set_state(AdminForm.waiting_for_user)
     await callback.answer()
+
 
 @dp.message(AdminForm.waiting_for_user)
 async def admin_grant_user(message: types.Message, state: FSMContext):
@@ -641,6 +652,7 @@ async def admin_grant_user(message: types.Message, state: FSMContext):
         pass
     await state.clear()
 
+
 @dp.callback_query(F.data == "admin_revoke")
 async def admin_revoke_start(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
@@ -650,6 +662,7 @@ async def admin_revoke_start(callback: types.CallbackQuery, state: FSMContext):
                     cancel_keyboard())
     await state.set_state(AdminForm.waiting_for_user_remove)
     await callback.answer()
+
 
 @dp.message(AdminForm.waiting_for_user_remove)
 async def admin_revoke_user(message: types.Message, state: FSMContext):
@@ -681,6 +694,7 @@ async def admin_revoke_user(message: types.Message, state: FSMContext):
                          reply_markup=admin_keyboard())
     await state.clear()
 
+
 @dp.callback_query(F.data == "admin_promo")
 async def admin_promo_start(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
@@ -699,6 +713,7 @@ async def admin_promo_start(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminForm.waiting_for_promo_action)
     await callback.answer()
 
+
 @dp.callback_query(AdminForm.waiting_for_promo_action, F.data.startswith("promoact_"))
 async def admin_promo_action(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
@@ -716,6 +731,7 @@ async def admin_promo_action(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
 
+
 @dp.callback_query(F.data == "admin_broadcast")
 async def admin_broadcast_start(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
@@ -724,6 +740,7 @@ async def admin_broadcast_start(callback: types.CallbackQuery, state: FSMContext
     await safe_edit(callback, "📢 Введите текст рассылки:", cancel_keyboard())
     await state.set_state(AdminForm.waiting_for_broadcast)
     await callback.answer()
+
 
 @dp.message(AdminForm.waiting_for_broadcast)
 async def admin_broadcast(message: types.Message, state: FSMContext):
