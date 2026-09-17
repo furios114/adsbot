@@ -1,8 +1,5 @@
 """
-База данных через Postgres (Neon.tech).
-Асинхронная работа через asyncpg.
-
-ВАЖНО: все методы теперь async — их надо вызывать через await.
+База данных через Postgres.
 """
 import os
 import asyncpg
@@ -15,7 +12,6 @@ _pool: Optional[asyncpg.Pool] = None
 
 
 async def init_pool():
-    """Создаёт пул соединений. Вызывается один раз при старте бота."""
     global _pool
     if _pool is None:
         if not DATABASE_URL:
@@ -33,17 +29,11 @@ async def close_pool():
 
 def _pool_or_raise() -> asyncpg.Pool:
     if _pool is None:
-        raise RuntimeError("Пул БД не инициализирован. Вызови init_pool() при старте.")
+        raise RuntimeError("Пул БД не инициализирован.")
     return _pool
 
 
 class Database:
-    """
-    Асинхронная обёртка над Postgres.
-    Использование:
-        async with Database() as db:
-            user = await db.get_user(123)
-    """
     def __init__(self):
         self.pool = _pool_or_raise()
 
@@ -53,7 +43,6 @@ class Database:
     async def __aexit__(self, *args):
         pass
 
-    # ---------- USERS ----------
     async def get_user(self, telegram_id: int) -> Optional[Dict]:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -64,24 +53,18 @@ class Database:
     async def create_user(self, telegram_id: int, username, full_name,
                           referrer_id=None) -> Optional[Dict]:
         trial_until = datetime.now() + timedelta(days=7)
-
         async with self.pool.acquire() as conn:
-            # Проверка реферера
             if referrer_id:
                 ref_exists = await conn.fetchval(
                     "SELECT 1 FROM users WHERE telegram_id = $1", referrer_id
                 )
                 if not ref_exists:
                     referrer_id = None
-
-            # Создание юзера
             await conn.execute("""
                 INSERT INTO users (telegram_id, username, full_name, trial_until, referrer_id)
                 VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT (telegram_id) DO NOTHING
             """, telegram_id, username, full_name, trial_until, referrer_id)
-
-            # Реферальный бонус
             if referrer_id and referrer_id != telegram_id:
                 try:
                     await conn.execute("""
@@ -94,11 +77,11 @@ class Database:
                     """, referrer_id)
                 except asyncpg.UniqueViolationError:
                     pass
-
             row = await conn.fetchrow(
                 "SELECT * FROM users WHERE telegram_id = $1", telegram_id
             )
             return dict(row) if row else None
+
 async def update_user_status(self, telegram_id: int, status: str, months: int = None):
     async with self.pool.acquire() as conn:
         if status == "premium_forever":
@@ -108,7 +91,6 @@ async def update_user_status(self, telegram_id: int, status: str, months: int = 
                 WHERE telegram_id=$1
             """, telegram_id)
         elif status == "premium" and months:
-            # Продление, если уже премиум
             existing = await conn.fetchval(
                 "SELECT premium_until FROM users WHERE telegram_id=$1", telegram_id
             )
@@ -149,7 +131,6 @@ async def add_balance(self, telegram_id: int, amount: int):
             UPDATE users SET balance = balance + $1 WHERE telegram_id = $2
         """, amount, telegram_id)
 
-# ---------- ORDERS ----------
 async def get_today_orders_count(self, telegram_id: int) -> int:
     async with self.pool.acquire() as conn:
         return await conn.fetchval("""
@@ -165,14 +146,12 @@ async def create_order(self, telegram_id: int, category: str,
             VALUES ($1, $2, $3, 0, $4)
         """, telegram_id, category, description, contacts)
 
-# ---------- REFERRALS ----------
 async def get_referrals_count(self, telegram_id: int) -> int:
     async with self.pool.acquire() as conn:
         return await conn.fetchval(
             "SELECT COUNT(*) FROM referrals WHERE referrer_id=$1", telegram_id
         )
 
-# ---------- CATEGORIES ----------
 async def get_user_categories(self, telegram_id: int) -> List[str]:
     async with self.pool.acquire() as conn:
         rows = await conn.fetch(
@@ -196,7 +175,7 @@ async def toggle_user_category(self, telegram_id: int, category: str):
                 "INSERT INTO user_categories (user_id, category) VALUES ($1, $2)",
                 telegram_id, category
             )
-# ---------- PROMOCODES ----------
+
 async def create_promocode(self, code: str, action: str, value: int):
     async with self.pool.acquire() as conn:
         await conn.execute("""
@@ -218,7 +197,6 @@ async def use_promocode(self, code: str, user_id: int) -> Optional[Dict]:
         )
         return dict(row)
 
-# ---------- ADS ----------
 async def create_ad(self, user_id: int, ad_text: str, media_type: str,
                     media_id: str, button_text: str, button_url: str):
     async with self.pool.acquire() as conn:
@@ -239,7 +217,6 @@ async def mark_last_ad_paid(self, user_id: int):
             )
         """, user_id)
 
-# ---------- PARSED ORDERS (на будущее) ----------
 async def create_parsed_order(self, source_chat, source_chat_title,
                                author_id, author_username, author_name,
                                message_id, message_text, message_link, category):
