@@ -18,6 +18,7 @@ from utils import safe_edit, rub_to_ton, find_ton_payment
 from runtime import bot, dp
 
 
+# ==================== /START ====================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -32,17 +33,19 @@ async def cmd_start(message: types.Message, state: FSMContext):
         except ValueError:
             ref_id = None
 
-    with Database() as db:
-        user = db.get_user(user_id)
+    async with Database() as db:
+        user = await db.get_user(user_id)
         if not user:
-            user = db.create_user(user_id, message.from_user.username,
-                                  message.from_user.full_name, ref_id)
+            user = await db.create_user(
+                user_id, message.from_user.username,
+                message.from_user.full_name, ref_id
+            )
         if user_id in ADMIN_IDS and user['status'] != 'premium_forever':
-            db.update_user_status(user_id, 'premium_forever')
+            await db.update_user_status(user_id, 'premium_forever')
 
     await message.answer(
         "📊 Тебе больше не нужно искать покупателей — мы делаем это за тебя!\n\n"
-        "🔎 Ищем покупателей рекламы, ОП и трафика в 800+ чатах Telegram\n\n"
+        "🔎 Ищем покупателей рекламы, ОП и трафика в 127 чатах Telegram\n\n"
         "💸 Начни зарабатывать в разы больше!\n\n"
         "Выбери действие 👇",
         reply_markup=main_keyboard(user_id),
@@ -55,7 +58,7 @@ async def menu_home(callback: types.CallbackQuery, state: FSMContext):
     await safe_edit(
         callback,
         "📊 Тебе больше не нужно искать покупателей — мы делаем это за тебя!\n\n"
-        "🔎 Ищем покупателей рекламы, ОП и трафика в 800+ чатах Telegram\n\n"
+        "🔎 Ищем покупателей рекламы, ОП и трафика в 127 чатах Telegram\n\n"
         "💸 Начни зарабатывать в разы больше!\n\n"
         "Выбери действие 👇",
         main_keyboard(callback.from_user.id),
@@ -63,13 +66,18 @@ async def menu_home(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+# ==================== АККАУНТ ====================
 @dp.callback_query(F.data == "menu_account")
 async def account(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    with Database() as db:
-        user = db.get_user(user_id) or db.create_user(
-            user_id, callback.from_user.username, callback.from_user.full_name)
-        referrals = db.get_referrals_count(user_id)
+    async with Database() as db:
+        user = await db.get_user(user_id)
+        if not user:
+            user = await db.create_user(
+                user_id, callback.from_user.username,
+                callback.from_user.full_name
+            )
+        referrals = await db.get_referrals_count(user_id)
 
     status_text = {
         'premium_forever': "👑 ПРЕМИУМ НАВСЕГДА",
@@ -87,6 +95,7 @@ async def account(callback: types.CallbackQuery):
     await callback.answer()
 
 
+# ==================== ПРЕМИУМ ====================
 @dp.callback_query(F.data == "menu_premium")
 async def show_premium(callback: types.CallbackQuery):
     if callback.from_user.id in ADMIN_IDS:
@@ -178,8 +187,8 @@ async def check_payment(callback: types.CallbackQuery):
 
     found = await find_ton_payment(expected_comment, expected_ton)
     if found:
-        with Database() as db:
-            db.update_user_status(user_id, 'premium', info['months'])
+        async with Database() as db:
+            await db.update_user_status(user_id, 'premium', info['months'])
         await safe_edit(callback,
                         f"✅ Платеж подтвержден!\n\n"
                         f"Премиум на {info['months']} мес. активирован!\n\n"
@@ -198,14 +207,19 @@ async def check_payment(callback: types.CallbackQuery):
                         kb)
 
 
+# ==================== ЗАЯВКА ====================
 @dp.callback_query(F.data == "menu_order")
 async def order_start(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     await state.clear()
-    with Database() as db:
-        user = db.get_user(user_id) or db.create_user(
-            user_id, callback.from_user.username, callback.from_user.full_name)
-        today = db.get_today_orders_count(user_id)
+    async with Database() as db:
+        user = await db.get_user(user_id)
+        if not user:
+            user = await db.create_user(
+                user_id, callback.from_user.username,
+                callback.from_user.full_name
+            )
+        today = await db.get_today_orders_count(user_id)
 
     if user['status'] == 'premium_forever' or user_id in ADMIN_IDS:
         max_orders = 999
@@ -290,9 +304,9 @@ async def _finalize_order(message: types.Message, from_user, state: FSMContext, 
     description = data.get('description', '')
     user_id = from_user.id
 
-    with Database() as db:
-        user = db.get_user(user_id)
-        db.create_order(user_id, category, description, contacts)
+    async with Database() as db:
+        user = await db.get_user(user_id)
+        await db.create_order(user_id, category, description, contacts)
 
     user_status = ("👑 Админ" if user_id in ADMIN_IDS
                    else "💎 ПРЕМИУМ" if user and user['status'] in ('premium', 'premium_forever')
@@ -326,15 +340,15 @@ async def _broadcast_order(buyer_link, user_status, description, contacts, categ
         f"👤 Статус: {user_status}\n"
         f"📱 Контакт: {contacts}"
     )
-    with Database() as db:
-        users = db.get_all_users()
+    async with Database() as db:
+        users = await db.get_all_users()
 
     sent_count = 0
     for u in users:
         try:
             if u['status'] == 'premium':
-                with Database() as db2:
-                    user_cats = db2.get_user_categories(u['telegram_id'])
+                async with Database() as db2:
+                    user_cats = await db2.get_user_categories(u['telegram_id'])
                 if user_cats and category not in user_cats:
                     continue
             await bot.send_message(u['telegram_id'], text, reply_markup=kb)
@@ -351,13 +365,18 @@ async def _broadcast_order(buyer_link, user_status, description, contacts, categ
             pass
 
 
+# ==================== РЕФЕРАЛЫ ====================
 @dp.callback_query(F.data == "menu_referral")
 async def referral(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    with Database() as db:
-        user = db.get_user(user_id) or db.create_user(
-            user_id, callback.from_user.username, callback.from_user.full_name)
-        count = db.get_referrals_count(user_id)
+    async with Database() as db:
+        user = await db.get_user(user_id)
+        if not user:
+            user = await db.create_user(
+                user_id, callback.from_user.username,
+                callback.from_user.full_name
+            )
+        count = await db.get_referrals_count(user_id)
     me = await bot.get_me()
     ref_link = f"https://t.me/{me.username}?start=ref_{user_id}"
     text = (
@@ -369,14 +388,27 @@ async def referral(callback: types.CallbackQuery):
     )
     await safe_edit(callback, text, main_keyboard(user_id))
     await callback.answer()
+# ==================== КАТЕГОРИИ ====================
 @dp.callback_query(F.data == "menu_categories")
 async def show_categories(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+    async with Database() as db:
+        user_cats = await db.get_user_categories(user_id)
+    rows = []
+    for cat in CATEGORIES:
+        status = "✅" if cat in user_cats else "❌"
+        rows.append([InlineKeyboardButton(
+            text=f"{status} {cat}",
+            callback_data=f"cat_toggle_{cat}"
+        )])
+    rows.append([InlineKeyboardButton(text="💎 Получить ПРЕМИУМ", callback_data="menu_premium")])
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_home")])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
     await safe_edit(
         callback,
         "📂 Выбери категории заявок, которые хочешь получать:\n"
         "✅ — получаешь, ❌ — не получаешь",
-        categories_keyboard(user_id),
+        kb,
     )
     await callback.answer()
 
@@ -388,17 +420,29 @@ async def toggle_category(callback: types.CallbackQuery):
     if cat not in CATEGORIES:
         await callback.answer("❌ Неверная категория", show_alert=True)
         return
-    with Database() as db:
-        db.toggle_user_category(user_id, cat)
+    async with Database() as db:
+        await db.toggle_user_category(user_id, cat)
+        user_cats = await db.get_user_categories(user_id)
+    rows = []
+    for c in CATEGORIES:
+        status = "✅" if c in user_cats else "❌"
+        rows.append([InlineKeyboardButton(
+            text=f"{status} {c}",
+            callback_data=f"cat_toggle_{c}"
+        )])
+    rows.append([InlineKeyboardButton(text="💎 Получить ПРЕМИУМ", callback_data="menu_premium")])
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_home")])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
     await safe_edit(
         callback,
         "📂 Выбери категории заявок, которые хочешь получать:\n"
         "✅ — получаешь, ❌ — не получаешь",
-        categories_keyboard(user_id),
+        kb,
     )
     await callback.answer("✅ Обновлено")
 
 
+# ==================== РЕКЛАМА ====================
 @dp.callback_query(F.data == "menu_ad")
 async def ad_start(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
@@ -491,8 +535,8 @@ async def ad_publish(callback: types.CallbackQuery, state: FSMContext):
     comment = f"ad_{user_id}"
     total_ton = rub_to_ton(AD_PRICE_RUB)
 
-    with Database() as db:
-        db.create_ad(
+    async with Database() as db:
+        await db.create_ad(
             user_id,
             data.get('ad_text', ''),
             data.get('ad_media', {}).get('type', ''),
@@ -532,8 +576,8 @@ async def check_ad_payment(callback: types.CallbackQuery):
     found = await find_ton_payment(expected_comment, expected_ton)
 
     if found:
-        with Database() as db:
-            db.mark_last_ad_paid(user_id)
+        async with Database() as db:
+            await db.mark_last_ad_paid(user_id)
         await safe_edit(callback,
                         "✅ Реклама оплачена!\n\n"
                         "Ваше объявление будет опубликовано после модерации.\n"
@@ -552,6 +596,7 @@ async def check_ad_payment(callback: types.CallbackQuery):
                         kb)
 
 
+# ==================== ПРОМОКОД ====================
 @dp.callback_query(F.data == "menu_promo")
 async def promo_start(callback: types.CallbackQuery, state: FSMContext):
     await safe_edit(callback, "🎫 Введите промокод:", cancel_keyboard())
@@ -563,17 +608,17 @@ async def promo_start(callback: types.CallbackQuery, state: FSMContext):
 async def promo_use(message: types.Message, state: FSMContext):
     code = message.text.strip().upper()
     await state.clear()
-    with Database() as db:
-        promo = db.use_promocode(code, message.from_user.id)
+    async with Database() as db:
+        promo = await db.use_promocode(code, message.from_user.id)
         if not promo:
             await message.answer("❌ Промокод не найден или уже использован.",
                                  reply_markup=main_keyboard(message.from_user.id))
             return
         if promo['action'] in ("premium_7", "premium_30"):
-            db.update_user_status(message.from_user.id, 'premium', 1)
+            await db.update_user_status(message.from_user.id, 'premium', 1)
             text = "✅ Промокод активирован!\n\nВы получили ПРЕМИУМ на 30 дней!"
         elif promo['action'] == "balance":
-            db.add_balance(message.from_user.id, promo['value'])
+            await db.add_balance(message.from_user.id, promo['value'])
             text = f"✅ Промокод активирован!\n\nВы получили {promo['value']} ₽ на баланс!"
         else:
             text = "✅ Промокод активирован!"
@@ -581,6 +626,7 @@ async def promo_use(message: types.Message, state: FSMContext):
     await message.answer(text, reply_markup=main_keyboard(message.from_user.id))
 
 
+# ==================== АДМИН-ПАНЕЛЬ ====================
 @dp.callback_query(F.data == "menu_admin")
 async def admin_menu(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
@@ -596,9 +642,9 @@ async def admin_stats(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("❌ Нет доступа", show_alert=True)
         return
-    with Database() as db:
-        total = db.count_users()
-        premium = db.count_premium()
+    async with Database() as db:
+        total = await db.count_users()
+        premium = await db.count_premium()
     text = (f"📊 Статистика\n\n"
             f"👥 Всего пользователей: {total}\n"
             f"💎 Премиум: {premium}")
@@ -622,16 +668,17 @@ async def admin_grant_user(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
     target = message.text.strip()
-    with Database() as db:
+    async with Database() as db:
         user = None
         if target.startswith("@"):
-            cur = db.conn.cursor()
-            cur.execute("SELECT * FROM users WHERE username=?", (target[1:],))
-            row = cur.fetchone()
-            user = dict(row) if row else None
+            async with db.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT * FROM users WHERE username=$1", target[1:]
+                )
+                user = dict(row) if row else None
         else:
             try:
-                user = db.get_user(int(target))
+                user = await db.get_user(int(target))
             except ValueError:
                 user = None
 
@@ -641,7 +688,7 @@ async def admin_grant_user(message: types.Message, state: FSMContext):
             await state.clear()
             return
 
-        db.update_user_status(user['telegram_id'], 'premium_forever')
+        await db.update_user_status(user['telegram_id'], 'premium_forever')
 
     await message.answer(f"✅ {target} получил ПРЕМИУМ НАВСЕГДА!",
                          reply_markup=admin_keyboard())
@@ -669,16 +716,17 @@ async def admin_revoke_user(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
     target = message.text.strip()
-    with Database() as db:
+    async with Database() as db:
         user = None
         if target.startswith("@"):
-            cur = db.conn.cursor()
-            cur.execute("SELECT * FROM users WHERE username=?", (target[1:],))
-            row = cur.fetchone()
-            user = dict(row) if row else None
+            async with db.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT * FROM users WHERE username=$1", target[1:]
+                )
+                user = dict(row) if row else None
         else:
             try:
-                user = db.get_user(int(target))
+                user = await db.get_user(int(target))
             except ValueError:
                 user = None
 
@@ -688,7 +736,7 @@ async def admin_revoke_user(message: types.Message, state: FSMContext):
             await state.clear()
             return
 
-        db.update_user_status(user['telegram_id'], 'trial')
+        await db.update_user_status(user['telegram_id'], 'trial')
 
     await message.answer(f"✅ С {target} снят премиум.",
                          reply_markup=admin_keyboard())
@@ -720,8 +768,8 @@ async def admin_promo_action(callback: types.CallbackQuery, state: FSMContext):
         return
     _, action, value = callback.data.split("_", 2)
     code = "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
-    with Database() as db:
-        db.create_promocode(code, action, int(value))
+    async with Database() as db:
+        await db.create_promocode(code, action, int(value))
 
     await safe_edit(callback,
                     f"✅ Промокод создан!\n\n"
@@ -748,8 +796,8 @@ async def admin_broadcast(message: types.Message, state: FSMContext):
         return
     text = message.text
     await state.clear()
-    with Database() as db:
-        users = db.get_all_users()
+    async with Database() as db:
+        users = await db.get_all_users()
     sent = 0
     for u in users:
         try:
