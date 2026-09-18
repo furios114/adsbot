@@ -1,7 +1,7 @@
 import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "8961329814:AAGmj_OW6YyalGLz_n_hlXb-dcZ4Sd31P8E"
-ADMIN_IDS = [8678187296, 5973645939]
+ADMIN_IDS = [8678187296, 5973645939, 910865931]
 
 # ---- Telegram API (my.telegram.org) ----
 API_ID = 2040                             # <-- ВСТАВЬ СВОЙ api_id (число)
