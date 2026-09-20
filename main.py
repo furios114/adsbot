@@ -1,11 +1,14 @@
 import asyncio
 import logging
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from database import init_pool, close_pool
 from runtime import bot, dp
 from parser.client import ParserClient
 from parser.dispatcher import broadcast_worker
-from config import ADMIN_IDS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,7 +31,7 @@ async def main():
     parser = ParserClient(bot)
     asyncio.create_task(parser.start())
 
-    asyncio.create_task(broadcast_worker(bot, ADMIN_IDS, interval=600))
+    asyncio.create_task(broadcast_worker(bot, interval=600))
 
     try:
         await dp.start_polling(bot)
