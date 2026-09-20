@@ -127,6 +127,32 @@ class Database:
                 telegram_id,
             )
 
+    async def get_users_by_category(self, category: str) -> List[Dict]:
+        """
+        Юзеры, подписанные на категорию.
+        Если у юзера вообще нет категорий — считается, что хочет всё.
+        Плюс всегда включаем premium и premium_forever.
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT u.telegram_id
+                FROM users u
+                WHERE u.status IN ('premium', 'premium_forever')
+                   OR NOT EXISTS (
+                       SELECT 1 FROM user_categories uc
+                       WHERE uc.telegram_id = u.telegram_id
+                   )
+                   OR EXISTS (
+                       SELECT 1 FROM user_categories uc
+                       WHERE uc.telegram_id = u.telegram_id
+                         AND uc.category = $1
+                   )
+                """,
+                category,
+            )
+            return [dict(r) for r in rows]
+
     # ==================== CATEGORIES ====================
     async def get_user_categories(self, telegram_id: int) -> List[str]:
         async with self.pool.acquire() as conn:
@@ -156,7 +182,7 @@ class Database:
                     telegram_id, category,
                 )
 
-    # ==================== ORDERS (пользовательские заявки) ====================
+    # ==================== ORDERS ====================
     async def create_order(self, user_id: int, category: str,
                            description: str, contacts: str):
         async with self.pool.acquire() as conn:
