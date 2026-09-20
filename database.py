@@ -141,11 +141,11 @@ class Database:
                 WHERE u.status IN ('premium', 'premium_forever')
                    OR NOT EXISTS (
                        SELECT 1 FROM user_categories uc
-                       WHERE uc.telegram_id = u.telegram_id
+                       WHERE uc.user_id = u.telegram_id
                    )
                    OR EXISTS (
                        SELECT 1 FROM user_categories uc
-                       WHERE uc.telegram_id = u.telegram_id
+                       WHERE uc.user_id = u.telegram_id
                          AND uc.category = $1
                    )
                 """,
@@ -157,7 +157,7 @@ class Database:
     async def get_user_categories(self, telegram_id: int) -> List[str]:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT category FROM user_categories WHERE telegram_id = $1",
+                "SELECT category FROM user_categories WHERE user_id = $1",
                 telegram_id,
             )
             return [r["category"] for r in rows]
@@ -166,18 +166,18 @@ class Database:
         async with self.pool.acquire() as conn:
             exists = await conn.fetchval(
                 "SELECT 1 FROM user_categories "
-                "WHERE telegram_id = $1 AND category = $2",
+                "WHERE user_id = $1 AND category = $2",
                 telegram_id, category,
             )
             if exists:
                 await conn.execute(
                     "DELETE FROM user_categories "
-                    "WHERE telegram_id = $1 AND category = $2",
+                    "WHERE user_id = $1 AND category = $2",
                     telegram_id, category,
                 )
             else:
                 await conn.execute(
-                    "INSERT INTO user_categories (telegram_id, category) "
+                    "INSERT INTO user_categories (user_id, category) "
                     "VALUES ($1, $2)",
                     telegram_id, category,
                 )
@@ -248,8 +248,31 @@ class Database:
             )
             return [dict(r) for r in rows]
 
+    async def take_next_unsent_order(self) -> Optional[Dict]:
+        """
+        Атомарно берёт одну неотправленную заявку И сразу помечает её
+        отправленной. Возвращает None, если очередь пуста.
+        Использует FOR UPDATE SKIP LOCKED — защита от дублей.
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE parsed_orders
+                SET sent = TRUE, sent_at = NOW()
+                WHERE id = (
+                    SELECT id FROM parsed_orders
+                    WHERE sent = FALSE OR sent IS NULL
+                    ORDER BY id ASC
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING *
+                """
+            )
+            return dict(row) if row else None
+
     async def mark_parsed_order_sent(self, order_id: int):
-        """Помечает заявку как отправленную."""
+        """Помечает заявку как отправленную (для ручного использования)."""
         async with self.pool.acquire() as conn:
             await conn.execute(
                 "UPDATE parsed_orders SET sent = TRUE, sent_at = NOW() "
