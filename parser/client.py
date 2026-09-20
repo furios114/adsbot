@@ -1,6 +1,6 @@
 """
 Telethon-клиент: читает сообщения, фильтрует, классифицирует
-и СРАЗУ рассылает подписчикам категории.
+и пишет в БД. Рассылка — отдельным воркером (parser/dispatcher.py).
 """
 import asyncio
 import logging
@@ -12,7 +12,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError
 
-from config import (API_ID, API_HASH, PARSER_MAX_CHATS, ADMIN_IDS,
+from config import (API_ID, API_HASH, PARSER_MAX_CHATS,
                     PARSER_KEYWORDS, PARSER_STOP_WORDS)
 from database import Database
 
@@ -22,8 +22,8 @@ SESSION_FILE = "parser_session.txt"
 
 BACKFILL_ENABLED = True
 BACKFILL_MESSAGES_PER_CHAT = 50
-BACKFILL_DELAY_BETWEEN_CHATS = (1, 2)      # уменьшили
-BACKFILL_DELAY_BETWEEN_MSGS = (0.2, 0.5)   # уменьшили
+BACKFILL_DELAY_BETWEEN_CHATS = (2, 5)
+BACKFILL_DELAY_BETWEEN_MSGS = (0.5, 1.5)
 
 MIN_TEXT_LENGTH = 20
 
@@ -234,50 +234,6 @@ class ParserClient:
             logger.info(f"[HIT] [{category}] {chat_title} | {text[:60]!r}")
         except Exception as e:
             logger.error(f"[DB] {e}\n{traceback.format_exc()}")
-            return
-
-        # СРАЗУ РАССЫЛАЕМ
-        await self._broadcast(category, text, chat_title, author_username,
-                              author_name, message_link)
-
-    async def _broadcast(self, category, text, chat_title, author_username,
-                        author_name, link):
-        """Шлёт заявку всем подписчикам категории + админам."""
-        try:
-            async with Database() as db:
-                rows = await db.get_users_by_category(category)
-        except Exception as e:
-            logger.error(f"[BROADCAST-DB] {e}")
-            return
-
-        ids = {u["telegram_id"] for u in rows}
-        ids.update(ADMIN_IDS)
-
-        author = f"@{author_username}" if author_username else (author_name or "—")
-
-        msg = (
-            f"📂 <b>{category}</b>\n"
-            f"💬 <b>{chat_title}</b>\n"
-            f"👤 {author}\n\n"
-            f"{text}"
-        )
-        if link:
-            msg += f"\n\n🔗 <a href='{link}'>Открыть в Telegram</a>"
-
-        sent = 0
-        for uid in ids:
-            try:
-                await self.bot.send_message(
-                    uid, msg,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-                sent += 1
-                await asyncio.sleep(0.1)   # антифлуд
-            except Exception as e:
-                logger.warning(f"Не доставлено {uid}: {e}")
-
-        logger.info(f"[SENT] [{category}] → {sent}/{len(ids)} получателей")
 
     async def stop(self):
         if self.client:
