@@ -1,10 +1,12 @@
 """
-Telethon-клиент для парсинга Telegram-чатов.
-Слушает все диалоги аккаунта (до PARSER_MAX_CHATS), находит заявки.
+Telethon-клиент: читает все сообщения из чатов и кладёт в БД.
+Рассылка — отдельным воркером (parser/dispatcher.py).
 """
 import asyncio
 import logging
 import os
+import random
+import traceback
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -12,17 +14,20 @@ from telethon.errors import FloodWaitError
 
 from config import API_ID, API_HASH, PARSER_MAX_CHATS
 from database import Database
-from parser.matcher import classify, is_relevant, make_message_link
-from parser.sender import broadcast_parsed_order
-
 
 logger = logging.getLogger(__name__)
 
 SESSION_FILE = "parser_session.txt"
 
+BACKFILL_ENABLED = True
+BACKFILL_MESSAGES_PER_CHAT = 50
+BACKFILL_DELAY_BETWEEN_CHATS = (2, 5)
+BACKFILL_DELAY_BETWEEN_MSGS = (0.5, 1.5)
+
+MIN_TEXT_LENGTH = 20
+
 
 def _load_session() -> str:
-    """Загружает сессию из файла или переменной окружения."""
     env_session = os.getenv("TG_SESSION_STRING")
     if env_session:
         return env_session
@@ -32,70 +37,60 @@ def _load_session() -> str:
     return ""
 
 
-def _save_session(session_string: str):
-    """Сохраняет сессию в файл."""
-    with open(SESSION_FILE, "w", encoding="utf-8") as f:
-        f.write(session_string)
-    logger.info("Сессия парсера сохранена")
-
-
 class ParserClient:
-    """Обёртка над Telethon-клиентом."""
     def __init__(self, bot):
         self.bot = bot
         self.client = None
         self.ready = False
         self.chats_count = 0
+        self._chats = []
 
     async def start(self):
-        """Запускает парсер. Требует, чтобы session_string уже была в файле."""
         if API_ID == 0 or not API_HASH or API_HASH.startswith("PASTE"):
-            logger.warning("Парсер не запущен: не заданы API_ID / API_HASH в config.py")
+            logger.error("Парсер не запущен: не заданы API_ID / API_HASH")
             return
 
         session_string = _load_session()
         if not session_string:
-            logger.warning("Парсер не запущен: нет сохранённой сессии. "
-                           "Запусти `python login.py` один раз.")
+            logger.error("Парсер не запущен: нет сессии. Запусти login.py")
             return
 
         try:
             self.client = TelegramClient(
                 StringSession(session_string),
-                API_ID, API_HASH
+                API_ID, API_HASH,
             )
             await self.client.connect()
+
             if not await self.client.is_user_authorized():
-                logger.error("Сессия парсера не авторизована. Запусти `python login.py`")
+                logger.error("Сессия не авторизована. Запусти login.py")
                 return
 
             me = await self.client.get_me()
             logger.info(f"Парсер подключён как @{me.username or me.id}")
 
-            # Собираем список чатов
             await self._collect_chats()
 
-            # Подписываемся на новые сообщения
+            if BACKFILL_ENABLED:
+                logger.info("Запуск бэкфилла истории...")
+                await self._backfill_history()
+                logger.info("Бэкфилл завершён")
+
             self.client.add_event_handler(
                 self._on_new_message,
-                events.NewMessage(incoming=True)
+                events.NewMessage(incoming=True),
             )
 
             self.ready = True
             logger.info(f"Парсер запущен, слушает {self.chats_count} чатов")
 
         except Exception as e:
-            logger.exception(f"Ошибка запуска парсера: {e}")
+            logger.error(f"Ошибка запуска парсера: {e}\n{traceback.format_exc()}")
 
     async def _collect_chats(self):
-        """Собирает список групп и каналов (без личных чатов), до лимита."""
         chats = []
         async for dialog in self.client.iter_dialogs(limit=None):
-            entity = dialog.entity
-            # Только группы и каналы
             if dialog.is_group or dialog.is_channel:
-                # Пропускаем каналы с односторонним вещанием? 
-                # Нет, оставляем — там тоже бывают заявки.
                 chats.append(dialog)
                 if len(chats) >= PARSER_MAX_CHATS:
                     break
@@ -103,45 +98,76 @@ class ParserClient:
         self.chats_count = len(chats)
         logger.info(f"Собрано {self.chats_count} чатов/каналов")
 
+    async def _backfill_history(self):
+        total = len(self._chats)
+        for idx, dialog in enumerate(self._chats, 1):
+            chat_title = getattr(dialog, "name", None) or str(dialog.id)
+            logger.info(f"[BACKFILL {idx}/{total}] {chat_title}")
+            try:
+                async for msg in self.client.iter_messages(
+                    dialog, limit=BACKFILL_MESSAGES_PER_CHAT
+                ):
+                    try:
+                        await self._process_message(msg, dialog.entity)
+                    except Exception as e:
+                        logger.debug(f"[BACKFILL] ошибка: {e}")
+                    await asyncio.sleep(
+                        random.uniform(*BACKFILL_DELAY_BETWEEN_MSGS)
+                    )
+                await asyncio.sleep(
+                    random.uniform(*BACKFILL_DELAY_BETWEEN_CHATS)
+                )
+            except FloodWaitError as e:
+                logger.warning(f"[BACKFILL] FloodWait {e.seconds}с")
+                await asyncio.sleep(e.seconds + 5)
+            except Exception as e:
+                logger.error(f"[BACKFILL] ошибка чата {chat_title}: {e}")
+
     async def _on_new_message(self, event):
-        """Обработчик нового сообщения."""
         try:
-            text = event.message.message or ""
-            if not is_relevant(text):
+            await self._process_message(event.message, await event.get_chat())
+        except Exception as e:
+            logger.error(f"[CRASH] {e}\n{traceback.format_exc()}")
+
+    async def _process_message(self, msg, chat):
+        text = msg.message or ""
+        if len(text) < MIN_TEXT_LENGTH:
+            return
+
+        try:
+            sender = await msg.get_sender()
+        except Exception:
+            sender = None
+
+        if sender and getattr(sender, "bot", False):
+            return
+
+        chat_id = msg.chat_id if hasattr(msg, "chat_id") else getattr(chat, "id", 0)
+        msg_id = msg.id
+        chat_key = str(chat_id)
+
+        async with Database() as db:
+            if await db.is_message_already_parsed(chat_key, msg_id):
                 return
 
-            category = classify(text)
-            if not category:
-                return
+        author_id = sender.id if sender else 0
+        author_username = getattr(sender, "username", None)
+        author_name = ""
+        if sender:
+            first = getattr(sender, "first_name", "") or ""
+            last = getattr(sender, "last_name", "") or ""
+            author_name = f"{first} {last}".strip()
 
-            # Проверка дубликата
-            chat_id = event.chat_id
-            msg_id = event.message.id
-            chat_key = str(chat_id)
-            with Database() as db:
-                if db.is_message_already_parsed(chat_key, msg_id):
-                    return
+        chat_username = getattr(chat, "username", None)
+        chat_title = getattr(chat, "title", None) or getattr(chat, "name", "") or ""
 
-            # Метаданные
-            sender = await event.get_sender()
-            author_id = sender.id if sender else 0
-            author_username = getattr(sender, 'username', None)
-            author_name = ""
-            if sender:
-                author_name = f"{getattr(sender, 'first_name', '') or ''} " \
-                              f"{getattr(sender, 'last_name', '') or ''}".strip()
+        message_link = ""
+        if chat_username:
+            message_link = f"https://t.me/{chat_username}/{msg_id}"
 
-            chat = await event.get_chat()
-            chat_username = getattr(chat, 'username', None)
-            chat_title = getattr(chat, 'title', None) or ""
-
-            message_link = ""
-            if chat_username:
-                message_link = make_message_link(chat_username, msg_id)
-
-            # Сохранение в БД
-            with Database() as db:
-                parsed_id = db.create_parsed_order(
+        try:
+            async with Database() as db:
+                await db.create_parsed_order(
                     source_chat=chat_key,
                     source_chat_title=chat_title,
                     author_id=author_id,
@@ -150,19 +176,11 @@ class ParserClient:
                     message_id=msg_id,
                     message_text=text,
                     message_link=message_link,
-                    category=category,
+                    category="all",
                 )
-
-            logger.info(f"Найдена заявка [{category}] в {chat_title or chat_username}")
-
-            # Рассылка юзерам
-            await broadcast_parsed_order(self.bot, parsed_id)
-
-        except FloodWaitError as e:
-            logger.warning(f"FloodWait {e.seconds}с, сплю...")
-            await asyncio.sleep(e.seconds)
+            logger.info(f"[SAVED] {chat_title} | {text[:60]!r}")
         except Exception as e:
-            logger.exception(f"Ошибка обработки сообщения: {e}")
+            logger.error(f"[DB] {e}\n{traceback.format_exc()}")
 
     async def stop(self):
         if self.client:
