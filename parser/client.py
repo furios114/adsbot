@@ -1,20 +1,18 @@
 """
-Telethon-клиент: читает сообщения из чатов, фильтрует,
-классифицирует по категориям и пишет в БД.
-Рассылка — отдельным воркером (parser/dispatcher.py).
+Telethon-клиент: читает сообщения, фильтрует, классифицирует
+и СРАЗУ рассылает подписчикам категории.
 """
 import asyncio
 import logging
 import os
 import random
-import re
 import traceback
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError
 
-from config import (API_ID, API_HASH, PARSER_MAX_CHATS,
+from config import (API_ID, API_HASH, PARSER_MAX_CHATS, ADMIN_IDS,
                     PARSER_KEYWORDS, PARSER_STOP_WORDS)
 from database import Database
 
@@ -24,61 +22,46 @@ SESSION_FILE = "parser_session.txt"
 
 BACKFILL_ENABLED = True
 BACKFILL_MESSAGES_PER_CHAT = 50
-BACKFILL_DELAY_BETWEEN_CHATS = (2, 5)
-BACKFILL_DELAY_BETWEEN_MSGS = (0.5, 1.5)
+BACKFILL_DELAY_BETWEEN_CHATS = (1, 2)      # уменьшили
+BACKFILL_DELAY_BETWEEN_MSGS = (0.2, 0.5)   # уменьшили
 
 MIN_TEXT_LENGTH = 20
 
 # ==================== ЦЕНЗУРА ====================
-# Мат и чернуха — если найдено, сообщение отбрасывается
 BAD_WORDS = [
-    # мат (корни)
     "хуй", "хуе", "хуё", "пизд", "бляд", "блят", "ебал", "ебан", "ебат",
     "ебуч", "ёб", "залуп", "муд", "манда", "пидор", "пидар", "пидр",
     "шлюх", "сука", "сучк", "мраз", "гнид", "долбоёб", "долбоеб",
     "уеб", "уёб", "выеб", "наеб", "отъеб", "подъеб", "разъеб",
-    # чернуха / криминал
-    "нарко", "мефедрон", "меф", "героин", "кокаин", "спайс", "соль",
-    "закладк", "клад", "заклад", "трамал", "амфетамин",
+    "нарко", "мефедрон", "меф", "героин", "кокаин", "спайс",
+    "закладк", "трамал", "амфетамин",
     "убийств", "расстрел", "теракт", "взрыв", "суицид",
-    "детск порн", "цп", "cp", "инцест", "педофил",
-    "скам", "мошенничеств", "обнал", "отмыв", "фейк паспорт",
-    "продам оружие", "куплю оружие", "автомат", "пистолет",
-    # реклама / спам-маркеры
-    "подписывайтесь", "подпишись", "подписка на канал",
-    "продам канал", "продаю канал", "продам группу",
-    "казино", "букмекер", "ставки на спорт", "1xbet", "1win",
-    "букмекерск", "беттинг",
+    "детск порн", "педофил", "инцест",
+    "скам", "мошенничеств", "обнал", "отмыв",
+    "продам оружие", "куплю оружие",
+    "казино", "букмекер", "1xbet", "1win",
 ]
 
 
 def is_clean(text: str) -> bool:
-    """False, если в тексте есть мат/чернуха/явный спам."""
     low = text.lower()
     return not any(w in low for w in BAD_WORDS)
 
 
-# ==================== ФИЛЬТР РЕЛЕВАНТНОСТИ ====================
-def _all_keywords():
-    for cat, words in PARSER_KEYWORDS.items():
-        for w in words:
-            yield cat, w
-
-
 def is_relevant(text: str) -> bool:
-    """True, если текст содержит хотя бы одну ключевую фразу."""
     low = text.lower()
-    # стоп-слова — если есть, сразу мимо
     for stop in PARSER_STOP_WORDS:
         if stop in low:
             return False
-    return any(kw in low for _, kw in _all_keywords())
+    for cat, words in PARSER_KEYWORDS.items():
+        for w in words:
+            if w in low:
+                return True
+    return False
 
 
 def classify(text: str) -> str | None:
-    """Возвращает категорию заявки или None."""
     low = text.lower()
-    # Первое совпадение по категориям
     for cat, words in PARSER_KEYWORDS.items():
         for w in words:
             if w in low:
@@ -194,21 +177,16 @@ class ParserClient:
         if len(text) < MIN_TEXT_LENGTH:
             return
 
-        # 1. Цензура
         if not is_clean(text):
-            logger.debug(f"[CENSOR] {text[:60]!r}")
             return
 
-        # 2. Релевантность
         if not is_relevant(text):
             return
 
-        # 3. Классификация
         category = classify(text)
         if not category:
             return
 
-        # 4. Автор
         try:
             sender = await msg.get_sender()
         except Exception:
@@ -221,7 +199,6 @@ class ParserClient:
         msg_id = msg.id
         chat_key = str(chat_id)
 
-        # 5. Дедупликация
         async with Database() as db:
             if await db.is_message_already_parsed(chat_key, msg_id):
                 return
@@ -241,7 +218,6 @@ class ParserClient:
         if chat_username:
             message_link = f"https://t.me/{chat_username}/{msg_id}"
 
-        # 6. Сохранение
         try:
             async with Database() as db:
                 await db.create_parsed_order(
@@ -258,6 +234,50 @@ class ParserClient:
             logger.info(f"[HIT] [{category}] {chat_title} | {text[:60]!r}")
         except Exception as e:
             logger.error(f"[DB] {e}\n{traceback.format_exc()}")
+            return
+
+        # СРАЗУ РАССЫЛАЕМ
+        await self._broadcast(category, text, chat_title, author_username,
+                              author_name, message_link)
+
+    async def _broadcast(self, category, text, chat_title, author_username,
+                        author_name, link):
+        """Шлёт заявку всем подписчикам категории + админам."""
+        try:
+            async with Database() as db:
+                rows = await db.get_users_by_category(category)
+        except Exception as e:
+            logger.error(f"[BROADCAST-DB] {e}")
+            return
+
+        ids = {u["telegram_id"] for u in rows}
+        ids.update(ADMIN_IDS)
+
+        author = f"@{author_username}" if author_username else (author_name or "—")
+
+        msg = (
+            f"📂 <b>{category}</b>\n"
+            f"💬 <b>{chat_title}</b>\n"
+            f"👤 {author}\n\n"
+            f"{text}"
+        )
+        if link:
+            msg += f"\n\n🔗 <a href='{link}'>Открыть в Telegram</a>"
+
+        sent = 0
+        for uid in ids:
+            try:
+                await self.bot.send_message(
+                    uid, msg,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+                sent += 1
+                await asyncio.sleep(0.1)   # антифлуд
+            except Exception as e:
+                logger.warning(f"Не доставлено {uid}: {e}")
+
+        logger.info(f"[SENT] [{category}] → {sent}/{len(ids)} получателей")
 
     async def stop(self):
         if self.client:
